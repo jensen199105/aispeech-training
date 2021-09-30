@@ -1,0 +1,85 @@
+import itertools
+
+from .reader import KaldiFeatReader, KaldiAliReader, KaldiLatticeReader, KaldiIvecReader, shared_offset
+
+
+class UtteranceReader:
+    """Load all the fields of one utterance from Kaldi rspec and pre-process
+
+    Parameters:
+        random_sweep (bool, optional): set True to randomly choose the starting frame offset from
+            0 to `skip_frame - 1`.
+
+    Examples:
+        >>> feat_rspecs = [{'rspec': 'ark:copy-feats scp:feat.scp ark:-|'}]  # REPLACE with a valid rspec
+        >>> ali_rspecs = [{'rspec': 'scp:copy-int-vector scp:ali.scp ark:-|'}]  # REPLACE with a valid rspec
+        >>> utt_reader = UtteranceReader()  # use the default parameters
+        >>> for uid, fields in utt_reader.read([feat_rspecs, ali_rspecs]):
+        >>>    print(uid)
+        >>>    print(fields)
+    """
+
+    def __init__(self, random_sweep=True):
+        self.random_sweep = random_sweep
+
+    def __repr__(self):
+        return f'{self.__class__.__name__} (random_sweep={self.random_sweep})'
+
+    def read(self, data_rspecs):
+        """Read the feature and alignment into one sample
+
+        A sample consists of (multiple) training features and (multiple)
+        alignments.
+
+        Args:
+            feat_rspecs (List[str]): list of feat rspecs, ususally viewed as
+                feature
+            ali_rspecs (List[str]): list of alignment rspecs, usually viewed
+                as label
+            ivec_rspecs (List[str]): list of i-vector rspecs
+            lat_rspecs (List[str]): list of lattice rspecs
+
+        Returns:
+            fields (tuple): tuple containing (feat, ali, ivec, lattice)
+
+                - feat (List[np.array]): features of the current sample
+                - ali (List[np.array]): alignments of current sample
+                - ivec (List[np.array]): list of i-vector of current sample, could
+                  be empty list
+                - lattice (List[kaldi.Lattice]): list of lattice objects defined in
+                  pykaldi, could be empty list
+        """
+        feat_rspecs, ali_rspecs, ivec_rspecs, lat_rspecs = data_rspecs
+
+        feat_end = len(feat_rspecs)
+        ali_end = len(ali_rspecs) + feat_end
+        ivec_end = len(ivec_rspecs) + ali_end
+
+        # Iterate over samples in all rspec files
+        feat_list = [KaldiFeatReader(**feat).read() for feat in feat_rspecs]
+        #ali_list = [KaldiAliReader(**ali).read() for ali in ali_rspecs]
+        ali_list = [KaldiFeatReader(**ali).read() for ali in ali_rspecs]
+        ivec_list = [KaldiIvecReader(**ivec).read() for ivec in ivec_rspecs]
+        lat_list = [KaldiLatticeReader(**lat).read() for lat in lat_rspecs]
+
+        for data_fields in zip(*feat_list, *ali_list, *ivec_list, *lat_list):
+            # set the sweep frame shift to another offset after processing one utterance
+            if self.random_sweep:
+                shared_offset.update_offset()
+            data_list = []
+            utterence_id_set = set()
+            # Iterate over features and alignments
+            for utterence_id, data in data_fields:
+                utterence_id_set.add(utterence_id)
+                data_list.append(data)
+            # Make sure they belong to the same utterence
+            assert len(utterence_id_set) == 1, 'Utterence ID mismatch {}, please check if the scp files are all' \
+                ' sorted in the same order: \n{}'.format(utterence_id_set, '\n'.join(
+                    [str(rspec) for rspec in itertools.chain.from_iterable(data_rspecs)]
+                ))
+
+            features = data_list[:feat_end]
+            alignments = data_list[feat_end:ali_end]
+            ivectors = data_list[ali_end:ivec_end]
+            lattices = data_list[ivec_end:]
+            yield utterence_id_set.pop(), (features, alignments, ivectors, lattices)
